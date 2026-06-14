@@ -39,10 +39,6 @@ struct Cli {
     #[arg(long)]
     overwrite: bool,
 
-    /// Skip the interactive TUI and use the plain CLI wizard instead
-    #[arg(long)]
-    no_tui: bool,
-
     /// Skip the interactive confirmation and run immediately
     #[arg(short = 'y', long)]
     yes: bool,
@@ -51,51 +47,6 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let cli = Cli::parse();
-
-    if !cli.no_tui && (atty::is(atty::Stream::Stdout) || atty::is(atty::Stream::Stdin)) {
-        // TUI mode (default when running interactively).
-        run_tui_mode(cli)
-    } else {
-        // Plain CLI mode (for scripts, CI, or --no-tui).
-        run_cli_mode(cli)
-    }
-}
-
-/// Launch the interactive TUI.
-fn run_tui_mode(cli: Cli) -> anyhow::Result<()> {
-    let mut config = pdf2webp::config::AppConfig::default();
-
-    // If source was given via CLI flags, scan now so the TUI starts with files.
-    if let Some(ref src) = cli.source {
-        config.source_path = src.clone();
-    }
-    if let Some(ref out) = cli.output {
-        config.output_path = out.clone();
-    }
-    if cli.overwrite {
-        config.overwrite = true;
-    }
-
-    let mut state = pdf2webp::tui::TuiState::new(config);
-
-    // If source is set, scan and populate the file list immediately.
-    if !state.config.source_path.as_os_str().is_empty() {
-        match pdf2webp::mirror::scan_pdf_files(&state.config.source_path) {
-            Ok(files) => {
-                state.set_files(files);
-            }
-            Err(e) => {
-                state.log_lines.push(format!("Scan error: {e}"));
-            }
-        }
-    }
-
-    pdf2webp::tui::run_tui(state)
-}
-
-/// Plain CLI wizard (same as the previous implementation).
-fn run_cli_mode(cli: Cli) -> anyhow::Result<()> {
     println!();
     println!(
         "  {} {}",
@@ -105,11 +56,15 @@ fn run_cli_mode(cli: Cli) -> anyhow::Result<()> {
     println!("  {}", style("─────────────────────").cyan());
     println!();
 
+    let cli = Cli::parse();
+
     let config = if cli.source.is_some() && cli.output.is_some() {
         build_config_from_args(&cli)
     } else {
         run_wizard(&cli)?
     };
+
+    // Validate config.
     let errors = config.validate();
     if !errors.is_empty() {
         println!();

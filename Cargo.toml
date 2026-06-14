@@ -29,9 +29,6 @@ clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
 indicatif = "0.17"
 console = "0.15"
-ratatui = "0.29"
-crossterm = "0.28"
-atty = "0.2.14"
 
 [profile.release]
 opt-level = 3
