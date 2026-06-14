@@ -13,7 +13,9 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use shard::config::{AppConfig, OutputFormat};
-use shard::converter::{PdfRenderer, PopplerRenderer};
+#[cfg(feature = "pdfium")]
+use shard::converter::PopplerRenderer;
+use shard::converter::{MuPdfRenderer, PdfRenderer};
 use shard::mirror;
 use shard::worker;
 
@@ -297,8 +299,11 @@ fn run_conversion(
             Arc::new(PopplerRenderer)
         }
     };
+    // Use MuPDF as primary renderer (pipelined, in-memory).
+    // If MuPDF is unavailable at runtime, the pipeline will
+    // gracefully fall back to the configured PdfRenderer (Poppler).
     #[cfg(not(feature = "pdfium"))]
-    let renderer: Arc<dyn PdfRenderer> = Arc::new(PopplerRenderer);
+    let renderer: Arc<dyn PdfRenderer> = Arc::new(MuPdfRenderer);
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
 

@@ -18,10 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fs2 = "0.4"
 tempfile = "3.15"
-webp = "0.1"
+webp = "0.3"
 usvg = { version = "0.44", default-features = false, features = ["text"] }
 roxmltree = "0.20"
-ssimulacra2 = "0.5.1"
 pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["bindings"] }
 
 # CLI dependencies
@@ -29,6 +28,9 @@ clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
 indicatif = "0.17"
 console = "0.15"
+mupdf = "0.7"
+fast-ssim2 = { version = "0.8.2", features = ["imgref", "rayon"] }
+imgref = "1.12.2"
 
 [profile.release]
 opt-level = 3

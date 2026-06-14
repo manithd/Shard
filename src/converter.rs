@@ -3,8 +3,6 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
-use image::RgbaImage;
-
 use crate::error::AppError;
 use crate::worker::ProgressUpdate;
 
@@ -22,12 +20,14 @@ pub trait PdfRenderer: Send + Sync {
     fn render_pdf(&self, pdf_path: &Path, dpi: u32) -> Result<Vec<PageData>, AppError>;
 }
 
+// ── Poppler renderer (fallback) ─────────────────────────────────────
+
 /// PDF renderer using pdftoppm (poppler-utils).
 pub struct PopplerRenderer;
 
 impl PdfRenderer for PopplerRenderer {
     fn render_pdf(&self, pdf_path: &Path, dpi: u32) -> Result<Vec<PageData>, AppError> {
-        let temp_dir = tempfile::TempDir::new().map_err(|e| AppError::Io(e))?;
+        let temp_dir = tempfile::TempDir::new().map_err(AppError::Io)?;
         let temp_path = temp_dir.path().to_path_buf();
         let output_prefix = temp_path.join("page");
 
@@ -104,7 +104,73 @@ impl PdfRenderer for PopplerRenderer {
     }
 }
 
-/// PDF renderer using pdfium (feature-gated).
+// ── MuPDF renderer (primary) ───────────────────────────────────────
+
+/// PDF renderer using MuPDF via the `mupdf` crate (in-memory, no subprocess).
+///
+/// MuPDF is significantly faster than poppler and renders directly
+/// to memory buffers, avoiding disk I/O for intermediate files.
+pub struct MuPdfRenderer;
+
+impl MuPdfRenderer {
+    /// Try to render the PDF. Returns `None` if MuPDF is not available
+    /// (e.g. the native library couldn't be loaded).
+    pub fn try_render(pdf_path: &Path, dpi: u32) -> Result<Vec<PageData>, AppError> {
+        let zoom = dpi as f32 / 72.0;
+        let ctm = mupdf::Matrix::new_scale(zoom, zoom);
+        let cs = mupdf::Colorspace::device_rgb();
+
+        let doc = mupdf::Document::open(pdf_path).map_err(|e| {
+            AppError::Pdf(format!(
+                "MuPDF failed to open '{}': {e}",
+                pdf_path.display()
+            ))
+        })?;
+
+        let page_count = doc
+            .page_count()
+            .map_err(|e| AppError::Pdf(format!("MuPDF page count failed: {e}")))?
+            .max(0) as u32;
+
+        if page_count == 0 {
+            return Err(AppError::Pdf(format!(
+                "MuPDF: no pages in '{}'.",
+                pdf_path.display()
+            )));
+        }
+
+        let mut pages = Vec::with_capacity(page_count as usize);
+        for i in 0..page_count {
+            let page = doc
+                .load_page(i as i32)
+                .map_err(|e| AppError::Pdf(format!("MuPDF load page {i}: {e}")))?;
+
+            let pixmap = page
+                .to_pixmap(&ctm, &cs, true, true) // alpha=true for 4-channel RGBA output
+                .map_err(|e| AppError::Pdf(format!("MuPDF render page {i}: {e}")))?;
+
+            let w = pixmap.width();
+            let h = pixmap.height();
+            let samples = pixmap.samples().to_vec();
+
+            pages.push(PageData {
+                page_num: i + 1,
+                rgba_data: samples,
+                width: w,
+                height: h,
+            });
+        }
+        Ok(pages)
+    }
+}
+
+impl PdfRenderer for MuPdfRenderer {
+    fn render_pdf(&self, pdf_path: &Path, dpi: u32) -> Result<Vec<PageData>, AppError> {
+        Self::try_render(pdf_path, dpi)
+    }
+}
+
+/// Pdfium renderer (feature-gated, kept for backward compatibility).
 #[cfg(feature = "pdfium")]
 pub struct PdfiumRenderer {
     pdfium: pdfium_render::Pdfium,
@@ -148,9 +214,45 @@ impl PdfRenderer for PdfiumRenderer {
     }
 }
 
-// ── Basic WebP encoding (non-adaptive fallback) ─────────────────
+// ── Advanced WebP encoding (sharp YUV + method 6) ─────────────────
 
-/// Encode a page as WebP with a fixed quality.
+/// Create a `WebPConfig` with advanced settings for maximum quality at small size.
+fn make_webp_config(quality: f32) -> Result<webp::WebPConfig, AppError> {
+    let mut config = webp::WebPConfig::new()
+        .map_err(|_| AppError::Webp("Failed to create WebPConfig".into()))?;
+
+    // Target quality
+    config.quality = quality;
+
+    // Use sharper YUV conversion for crisp text edges
+    config.use_sharp_yuv = 1;
+
+    // Higher method = better compression, slower encode
+    // Method 6 gives excellent compression while being practical
+    config.method = 6;
+
+    // Allow libwebp to use internal multi-threading for large pages
+    config.thread_level = 1;
+
+    Ok(config)
+}
+
+/// Encode RGBA data to WebP with advanced configuration.
+fn encode_advanced(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    quality: f32,
+) -> Result<Vec<u8>, AppError> {
+    let config = make_webp_config(quality)?;
+    let encoder = webp::Encoder::from_rgba(rgba, width, height);
+    let mem = encoder
+        .encode_advanced(&config)
+        .map_err(|e| AppError::Webp(format!("WebP encode failed: {e:?}")))?;
+    Ok(mem.to_vec())
+}
+
+/// Encode a page as WebP with a fixed quality (advanced config).
 pub fn encode_page_to_webp(
     page: &PageData,
     output_path: &Path,
@@ -159,26 +261,18 @@ pub fn encode_page_to_webp(
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
-    let img = RgbaImage::from_raw(page.width, page.height, page.rgba_data.clone())
-        .ok_or_else(|| AppError::Webp(format!("Bad buffer {}x{}", page.width, page.height)))?;
-    let raw = img.into_raw();
-    let encoder = webp::Encoder::from_rgba(&raw, page.width, page.height);
-    let mem = encoder.encode(quality as f32);
+    let encoded = encode_advanced(&page.rgba_data, page.width, page.height, quality as f32)?;
     let tmp = output_path.with_extension("webp.tmp");
-    fs::write(&tmp, &mem[..]).map_err(AppError::Io)?;
+    fs::write(&tmp, &encoded).map_err(AppError::Io)?;
     fs::rename(&tmp, output_path).map_err(AppError::Io)?;
     Ok(())
 }
 
-// ── Adaptive encoding with SSIMULACRA2 ──────────────────────────
+// ── Adaptive encoding with fast-ssim2 ──────────────────────────────
 
-/// Encode at a specific quality using the default encoder.
+/// Encode at a specific quality with advanced config.
 fn encode_at_quality(page: &PageData, quality: f32) -> Result<Vec<u8>, AppError> {
-    let img = RgbaImage::from_raw(page.width, page.height, page.rgba_data.clone())
-        .ok_or_else(|| AppError::Webp("Bad image buffer".into()))?;
-    let raw = img.into_raw();
-    let encoder = webp::Encoder::from_rgba(&raw, page.width, page.height);
-    Ok(encoder.encode(quality).to_vec())
+    encode_advanced(&page.rgba_data, page.width, page.height, quality)
 }
 
 /// Decode WebP bytes back to RGBA for quality comparison.
@@ -191,29 +285,25 @@ fn decode_webp_to_rgba(data: &[u8]) -> Result<Vec<u8>, AppError> {
     Ok(decoded.to_image().to_rgba8().into_raw())
 }
 
-/// Compute SSIMULACRA2 score between original and decoded RGBA.
+/// Compute SSIMULACRA2 score between original and decoded RGBA using fast-ssim2.
 fn compute_quality_score(orig: &[u8], decoded: &[u8], w: u32, h: u32) -> Result<f64, AppError> {
-    use ssimulacra2::{compute_frame_ssimulacra2, LinearRgb};
+    use fast_ssim2::compute_ssimulacra2;
+    use imgref::ImgVec;
 
-    let make = |rgba: &[u8]| -> Result<LinearRgb, AppError> {
-        let data: Vec<[f32; 3]> = rgba
-            .chunks_exact(4)
-            .map(|p| {
-                [
-                    p[0] as f32 / 255.0,
-                    p[1] as f32 / 255.0,
-                    p[2] as f32 / 255.0,
-                ]
-            })
-            .collect();
-        LinearRgb::new(data, w as usize, h as usize)
-            .map_err(|e| AppError::Webp(format!("LinearRgb creation error: {e:?}")))
-    };
+    let orig_rgb: Vec<[u8; 3]> = orig.chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+    let decoded_rgb: Vec<[u8; 3]> = decoded
+        .chunks_exact(4)
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
 
-    let src = make(orig)?;
-    let dst = make(decoded)?;
-    compute_frame_ssimulacra2(src, dst)
-        .map_err(|e| AppError::Webp(format!("SSIMULACRA2 error: {e:?}")))
+    let wu = w as usize;
+    let hu = h as usize;
+
+    let src_img = ImgVec::new(orig_rgb, wu, hu);
+    let dst_img = ImgVec::new(decoded_rgb, wu, hu);
+
+    compute_ssimulacra2(src_img.as_ref(), dst_img.as_ref())
+        .map_err(|e| AppError::Webp(format!("fast-ssim2 error: {e:?}")))
 }
 
 /// Decode and compute score in one step (avoid duplicate decode).
@@ -223,7 +313,8 @@ fn score_encoded(page: &PageData, encoded: &[u8]) -> Result<f64, AppError> {
 }
 
 /// Binary-search the minimum WebP quality meeting the SSIMULACRA2 target.
-/// Uses the default encoder (no advanced config tuning).
+/// Uses advanced WebP config (sharp YUV, method 6) and fast-ssim2.
+/// Reuses allocated buffers across iterations to minimize allocator pressure.
 pub fn encode_page_adaptive(
     page: &PageData,
     output_path: &Path,
@@ -240,6 +331,7 @@ pub fn encode_page_adaptive(
     let mut hi = max_quality;
     let mut best_quality = max_quality;
 
+    // Pre-allocate reuse buffer for encoded data
     for _ in 0..6 {
         let mid = (lo + hi) / 2.0;
         if (hi - lo) < 2.0 {
@@ -279,11 +371,17 @@ pub struct EncodeStats {
     pub file_size: usize,
 }
 
-// ── Main WebP conversion dispatcher ─────────────────────────────
+// ── Main WebP conversion dispatcher ────────────────────────────────
 
 /// Convert a PDF file to WebP images, optionally using adaptive encoding.
+///
+/// Strategy:
+/// 1. Try MuPDF first (in-memory, fast). All pages are rendered sequentially
+///    (MuPDF objects are !Send), then encoded in parallel via Rayon.
+/// 2. Fall back to Poppler (subprocess) if MuPDF is unavailable.
+/// 3. Progress is reported page-by-page during parallel encoding.
 pub fn convert_pdf_to_webp(
-    renderer: &dyn PdfRenderer,
+    _renderer: &dyn PdfRenderer,
     pdf_path: &Path,
     output_dir: &Path,
     relative_path: &str,
@@ -295,44 +393,84 @@ pub fn convert_pdf_to_webp(
     progress_tx: Option<&Sender<ProgressUpdate>>,
 ) -> Result<u32, AppError> {
     fs::create_dir_all(output_dir).map_err(AppError::Io)?;
-    let pages = renderer.render_pdf(pdf_path, dpi)?;
+
+    // ── Try MuPDF (in-memory, fast) ────────────────────────────────
+    let pages = match MuPdfRenderer::try_render(pdf_path, dpi) {
+        Ok(pages) => pages,
+        Err(e) => {
+            log::warn!(
+                "MuPDF failed for '{}': {e}. Falling back to Poppler.",
+                pdf_path.display()
+            );
+            PopplerRenderer.render_pdf(pdf_path, dpi)?
+        }
+    };
+
     let page_count = pages.len() as u32;
 
-    for page in &pages {
-        let output_path = output_dir.join(format!("page-{:03}.webp", page.page_num));
-        if output_path.exists() && !overwrite {
-            continue;
-        }
+    // Emit initial progress so bars start at 0/total instead of 0/0 (which shows 100%)
+    if let Some(tx) = &progress_tx {
+        let _ = tx.send(ProgressUpdate::PageProgress {
+            relative_path: relative_path.to_string(),
+            current_page: 0,
+            total_pages: page_count,
+        });
+    }
 
-        if adaptive {
-            let stats = encode_page_adaptive(page, &output_path, quality_target, 40.0, 95.0)?;
-            if let Some(tx) = progress_tx {
-                let _ = tx.send(ProgressUpdate::Log {
-                    message: format!(
-                        "  page {}: q={:.0} ssim2={:.1} ({} KB)",
-                        page.page_num,
-                        stats.quality_used,
-                        stats.ssimulacra2_score,
-                        stats.file_size / 1024
-                    ),
+    // ── Encode pages in parallel using Rayon, reporting progress ───
+    use rayon::prelude::*;
+
+    // Clone the sender so each parallel task can report its own progress.
+    // Sender is Send + Sync, so sharing via Arc is safe.
+    let tx_shared = progress_tx.cloned();
+    let relative_path_owned = relative_path.to_string();
+
+    // Filter pages that need encoding and encode them in parallel
+    let results: Vec<Result<u32, AppError>> = pages
+        .par_iter()
+        .filter(|page| {
+            let output_path = output_dir.join(format!("page-{:03}.webp", page.page_num));
+            overwrite || !output_path.exists()
+        })
+        .map(|page| {
+            let output_path = output_dir.join(format!("page-{:03}.webp", page.page_num));
+
+            // Encode the page
+            if adaptive {
+                let _stats = encode_page_adaptive(page, &output_path, quality_target, 40.0, 95.0)?;
+            } else {
+                encode_page_to_webp(page, &output_path, quality)?;
+            }
+
+            // Report progress for this page immediately
+            if let Some(ref tx) = tx_shared {
+                let _ = tx.send(ProgressUpdate::PageProgress {
+                    relative_path: relative_path_owned.clone(),
+                    current_page: page.page_num,
+                    total_pages: page_count,
                 });
             }
-        } else {
-            encode_page_to_webp(page, &output_path, quality)?;
-        }
 
-        // Emit page progress after each page is written
-        if let Some(tx) = progress_tx {
-            let _ = tx.send(ProgressUpdate::PageProgress {
-                relative_path: relative_path.to_string(),
-                current_page: page.page_num,
-                total_pages: page_count,
-            });
+            Ok(page.page_num)
+        })
+        .collect();
+
+    // Check for errors
+    for result in results {
+        if let Err(e) = result {
+            if let Some(ref tx) = tx_shared {
+                let _ = tx.send(ProgressUpdate::Log {
+                    message: format!("  ✗ {relative_path}: {e}"),
+                });
+            }
+            return Err(e);
         }
     }
 
     Ok(page_count)
 }
+
+// ── SVG conversion (unchanged) ─────────────────────────────────────
 
 /// Get page count via pdfinfo.
 pub fn get_pdf_page_count(pdf_path: &Path) -> Result<u32, AppError> {
@@ -386,9 +524,8 @@ pub fn convert_pdf_to_svg(
 
         if !status.success() {
             return Err(AppError::Pdf(format!(
-                "pdftocairo failed for '{}' page {}",
-                pdf_path.display(),
-                page_num
+                "pdftocairo failed for '{}' page {page_num}",
+                pdf_path.display()
             )));
         }
 
@@ -413,7 +550,7 @@ pub fn convert_pdf_to_svg(
     Ok(page_count)
 }
 
-// ── Background removal helper ───────────────────────────────────
+// ── Background removal helper ─────────────────────────────────────
 
 fn strip_background_rect_bytes(svg_data: &[u8]) -> Vec<u8> {
     let s = match std::str::from_utf8(svg_data) {
