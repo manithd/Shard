@@ -59,7 +59,9 @@ pub fn run_tui(mut state: TuiState) -> anyhow::Result<()> {
 
         terminal.draw(|f| draw_ui(f, &mut state))?;
 
-        if event::poll(Duration::from_millis(50))? {
+        // Process pending updates, then check for a key.
+        // Use a non-blocking read so we don't stall progress.
+        if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
