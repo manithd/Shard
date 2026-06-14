@@ -3,50 +3,32 @@ name = "pdf2webp"
 version = "0.1.0"
 edition = "2021"
 authors = ["AVABODA TOOLS"]
-description = "High-performance PDF to WebP/SVG converter for educational documents"
+description = "High-performance PDF to WebP/SVG converter — CLI"
 license = "MIT"
 
-[package.metadata.bundle]
-name = "PDF2WebP"
-identifier = "com.avaboda.pdf2webp"
-icon = ["ui/assets/icon.icns"]
-
 [dependencies]
-slint = "1.9"
 rayon = "1.10"
 walkdir = "2.5"
 anyhow = "1.0"
 thiserror = "2.0"
 log = "0.4"
 env_logger = "0.11"
-rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fs2 = "0.4"
 tempfile = "3.15"
-
-# WebP encoding via libwebp bindings
 webp = "0.1"
-
-# SVG post-processing
 usvg = { version = "0.44", default-features = false, features = ["text"] }
 roxmltree = "0.20"
-
-# SSIMULACRA2 perceptual quality metric
 ssimulacra2 = "0.5.1"
-
-# PDFium rendering (optional)
 pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["bindings"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.10"
-release-hub = "0.3"
-tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread", "time"] }
-rustls = { version = "0.23.40", features = ["ring"] }
-
-[build-dependencies]
-slint-build = "1.9"
+# CLI dependencies
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"
+indicatif = "0.17"
+console = "0.15"
 
 [profile.release]
 opt-level = 3
