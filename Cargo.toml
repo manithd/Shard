@@ -1,0 +1,65 @@
+[package]
+name = "pdf2webp"
+version = "0.1.0"
+edition = "2021"
+authors = ["AVABODA TOOLS"]
+description = "High-performance PDF to WebP/SVG converter for educational documents"
+license = "MIT"
+
+[package.metadata.bundle]
+name = "PDF2WebP"
+identifier = "com.avaboda.pdf2webp"
+icon = ["ui/assets/icon.icns"]
+
+[dependencies]
+slint = "1.9"
+rayon = "1.10"
+walkdir = "2.5"
+anyhow = "1.0"
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+fs2 = "0.4"
+tempfile = "3.15"
+
+# WebP encoding via libwebp bindings
+webp = "0.1"
+
+# SVG post-processing (always required for SVG output path)
+usvg = { version = "0.44", default-features = false, features = ["text"] }
+
+# XML parsing for SVG background removal (transitive dep of usvg, pinned for API stability)
+roxmltree = "0.20"
+
+# PDFium rendering (optional - requires pdfium binary installed on system)
+pdfium-render = { version = "0.8", optional = true, default-features = false, features = ["bindings"] }
+ssimulacra2 = "0.5.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
+[build-dependencies]
+slint-build = "1.9"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[features]
+default = []
+# Enable pdfium-render backend (requires pdfium library on system)
+pdfium = ["dep:pdfium-render"]
