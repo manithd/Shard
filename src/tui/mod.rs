@@ -4,7 +4,7 @@ pub use state::*;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -19,18 +19,20 @@ use ratatui::{
 use crate::worker;
 
 // ── Palette ─────────────────────────────────────────────
-const BG: Color = Color::Rgb(0x20, 0x22, 0x25);
-const SURFACE: Color = Color::Rgb(0x2f, 0x31, 0x36);
+const BG: Color = Color::Rgb(0x06, 0x06, 0x06);
+const SURFACE: Color = Color::Rgb(0x21, 0x21, 0x21);
 const BORDER: Color = Color::Rgb(0x40, 0x44, 0x4b);
-const BORDER_FOCUS: Color = Color::Rgb(0x42, 0x57, 0x44);
+const BORDER_FOCUS: Color = Color::Rgb(0x5f, 0xa6, 0xf1);
 const TEXT: Color = Color::Rgb(0xdc, 0xdd, 0xde);
 const TEXT_DIM: Color = Color::Rgb(0x8e, 0x92, 0x97);
 const TEXT_MUTED: Color = Color::Rgb(0x50, 0x54, 0x5c);
-const ACCENT: Color = Color::Rgb(0x42, 0x57, 0x44);
+const ACCENT: Color = Color::Rgb(0x5f, 0xa6, 0xf1);
+#[allow(dead_code)]
+const ACCENT_2: Color = Color::Rgb(0xf1, 0xa2, 0x78);
 const GREEN: Color = Color::Rgb(0x66, 0xbb, 0x6a);
-const RED: Color = Color::Rgb(0xef, 0x53, 0x50);
+const RED: Color = Color::Rgb(0x76, 0x25, 0x37);
 const ORANGE: Color = Color::Rgb(0xff, 0xa7, 0x26);
-const BLUE: Color = Color::Rgb(0x42, 0x9b, 0xd4);
+const BLUE: Color = Color::Rgb(0x5f, 0xa6, 0xf1);
 
 /// Run the TUI application.  Blocks until the user presses `q`.
 pub fn run_tui(mut state: TuiState) -> anyhow::Result<()> {
@@ -57,26 +59,24 @@ pub fn run_tui(mut state: TuiState) -> anyhow::Result<()> {
 
         terminal.draw(|f| draw_ui(f, &mut state))?;
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Tab => state.toggle_panel(),
-                        KeyCode::Up | KeyCode::Char('k') => state.move_cursor(-1),
-                        KeyCode::Down | KeyCode::Char('j') => state.move_cursor(1),
-                        KeyCode::Enter if !state.processing => {
-                            if !state.files.is_empty() {
-                                let rx = state.start_conversion()?;
-                                progress_rx = Some(rx);
-                            }
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Tab => state.toggle_panel(),
+                    KeyCode::Up | KeyCode::Char('k') => state.move_cursor(-1),
+                    KeyCode::Down | KeyCode::Char('j') => state.move_cursor(1),
+                    KeyCode::Enter if !state.processing => {
+                        if !state.files.is_empty() {
+                            let rx = state.start_conversion()?;
+                            progress_rx = Some(rx);
                         }
-                        KeyCode::Char(' ') => state.toggle_selected_file(),
-                        KeyCode::Char('a') => state.select_all(true),
-                        KeyCode::Char('n') => state.select_all(false),
-                        KeyCode::Char('s') if state.processing => state.stop_conversion(),
-                        _ => {}
                     }
+                    KeyCode::Char(' ') => state.toggle_selected_file(),
+                    KeyCode::Char('a') => state.select_all(true),
+                    KeyCode::Char('n') => state.select_all(false),
+                    KeyCode::Char('s') if state.processing => state.stop_conversion(),
+                    _ => {}
                 }
             }
         }

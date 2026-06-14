@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if !cli.no_tui && atty::is(atty::Stream::Stdout) {
+    if !cli.no_tui && (atty::is(atty::Stream::Stdout) || atty::is(atty::Stream::Stdin)) {
         // TUI mode (default when running interactively).
         run_tui_mode(cli)
     } else {
